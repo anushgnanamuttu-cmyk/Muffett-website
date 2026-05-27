@@ -1,19 +1,12 @@
 """
 Muffett Investment — Sector Rotation Tracker
-Deployed on Vercel, embedded via iframe on muffettinvestment.com
+Deployed on Vercel, embedded via iframe on muffettinvestments.com
 """
 
-from flask import Flask, Response
+from http.server import BaseHTTPRequestHandler
 import yfinance as yf
 import pandas as pd
 from datetime import datetime
-import time as time_mod
-
-app = Flask(__name__)
-
-# ── 1-hour data cache (avoids re-fetching on every page load) ────────────────
-_cache = {"html": None, "ts": 0}
-CACHE_TTL = 3600   # seconds
 
 # ── ETF Universe ─────────────────────────────────────────────────────────────
 SECTOR_ETFS = {
@@ -55,18 +48,22 @@ TECH_ETFS = {
 # ── Data Fetching ─────────────────────────────────────────────────────────────
 def fetch_returns(tickers):
     all_tickers = list(tickers.keys())
-    raw = yf.download(all_tickers, period="6mo", interval="1d",
-                      auto_adjust=True, progress=False)["Close"]
+    try:
+        raw = yf.download(all_tickers, period="6mo", interval="1d",
+                          auto_adjust=True, progress=False)["Close"]
+    except Exception:
+        raw = pd.DataFrame()
 
-    # Retry missing tickers individually
-    if len(all_tickers) == 1:
+    if isinstance(raw, pd.Series):
         raw = raw.to_frame(name=all_tickers[0])
+
     missing = [t for t in all_tickers if t not in raw.columns or raw[t].dropna().empty]
     for t in missing:
         try:
             s = yf.download(t, period="6mo", interval="1d",
                             auto_adjust=True, progress=False)["Close"]
-            raw[t] = s
+            if isinstance(s, pd.Series):
+                raw[t] = s
         except Exception:
             pass
 
@@ -80,7 +77,6 @@ def fetch_returns(tickers):
             p_1w   = float(series.iloc[-6])   if len(series) >= 6   else float(series.iloc[0])
             p_1m   = float(series.iloc[-22])  if len(series) >= 22  else float(series.iloc[0])
             p_1q   = float(series.iloc[-63])  if len(series) >= 63  else float(series.iloc[0])
-            # Previous period baselines (for delta arrows)
             p_prev_1w = float(series.iloc[-11]) if len(series) >= 11  else float(series.iloc[0])
             p_prev_1q = float(series.iloc[-126])if len(series) >= 126 else float(series.iloc[0])
 
@@ -97,7 +93,7 @@ def fetch_returns(tickers):
                 "ticker": ticker, "name": name,
                 "price": round(p_now, 2),
                 "ret_1w": ret_1w, "ret_1m": ret_1m, "ret_1q": ret_1q,
-                "vs_1w": vs_1w,   "vs_1q": vs_1q,
+                "vs_1w": vs_1w, "vs_1q": vs_1q,
                 "rs": rs,
             })
         except Exception:
@@ -109,7 +105,6 @@ def fetch_returns(tickers):
 
 # ── HTML Helpers ──────────────────────────────────────────────────────────────
 def heat_color(val, max_abs=8.0):
-    """Map a % return to a background colour (green/red gradient)."""
     clamp = max(-max_abs, min(max_abs, val))
     ratio = clamp / max_abs
     if ratio >= 0:
@@ -125,9 +120,9 @@ def ret_html(val):
     return f"<span style='color:{color};font-weight:600'>{sign}{val}%</span>"
 
 def delta_html(val):
-    if val > 0:   return f"<span style='color:#4caf50;font-size:.8rem'>▲ +{val}%</span>"
-    elif val < 0: return f"<span style='color:#ef5350;font-size:.8rem'>▼ {val}%</span>"
-    else:         return f"<span style='color:#666;font-size:.8rem'>─</span>"
+    if val > 0:   return f"<span style='color:#4caf50;font-size:.8rem'>&#9650; +{val}%</span>"
+    elif val < 0: return f"<span style='color:#ef5350;font-size:.8rem'>&#9660; {val}%</span>"
+    else:         return f"<span style='color:#666;font-size:.8rem'>&#8212;</span>"
 
 def rs_badge(rs):
     if rs >= 5:    label, c = "Strong",  "#1b5e20"
@@ -141,7 +136,7 @@ def build_heatmap(df, title):
     tiles = ""
     for _, row in df.iterrows():
         bg    = heat_color(row["ret_1w"])
-        arrow = "▲" if row["ret_1w"] > 0 else "▼" if row["ret_1w"] < 0 else "─"
+        arrow = "&#9650;" if row["ret_1w"] > 0 else "&#9660;" if row["ret_1w"] < 0 else "&#8212;"
         acol  = "#4caf50" if row["ret_1w"] > 0 else "#ef5350" if row["ret_1w"] < 0 else "#888"
         sign  = "+" if row["ret_1w"] > 0 else ""
         tiles += f"""
@@ -187,9 +182,8 @@ def build_table(df, title):
     </table>
     </div>"""
 
-# ── Full Page ─────────────────────────────────────────────────────────────────
 def build_page(sector_df, tech_df):
-    now  = datetime.now().strftime("%d %b %Y · %H:%M UTC")
+    now  = datetime.utcnow().strftime("%d %b %Y %H:%M UTC")
     s_hm = build_heatmap(sector_df.sort_values("ret_1w", ascending=False), "S&amp;P 500 Sector Heatmap — Weekly Returns")
     t_hm = build_heatmap(tech_df.sort_values("ret_1w",   ascending=False), "Tech Thematic ETF Heatmap — Weekly Returns")
     s_tb = build_table(sector_df, "S&amp;P 500 Sector ETFs — Relative Strength Ranking")
@@ -200,7 +194,6 @@ def build_page(sector_df, tech_df):
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="refresh" content="3600">
 <title>Sector Rotation Tracker — Muffett Investment</title>
 <style>
   :root {{
@@ -224,7 +217,6 @@ def build_page(sector_df, tech_df):
     font-size:.7rem; text-transform:uppercase; letter-spacing:2px;
     color:var(--muted); margin-bottom:14px; font-weight:600;
   }}
-  /* ── Heatmap ── */
   .heatmap {{
     display:grid;
     grid-template-columns:repeat(auto-fill,minmax(120px,1fr));
@@ -239,7 +231,6 @@ def build_page(sector_df, tech_df):
   .tile-name   {{ font-size:.65rem; color:var(--muted); margin:2px 0 6px }}
   .tile-ret    {{ font-size:1.3rem; font-weight:700 }}
   .tile-sub    {{ font-size:.65rem; color:var(--muted); margin-top:4px }}
-  /* ── Table ── */
   .table-wrap {{ overflow-x:auto; margin-bottom:40px }}
   table {{ width:100%; border-collapse:collapse; min-width:680px }}
   th {{
@@ -251,7 +242,6 @@ def build_page(sector_df, tech_df):
   tr:hover td {{ background:#13131a }}
   .muted {{ color:var(--muted) }}
   .mono  {{ font-family:'SF Mono',monospace; font-size:.85rem }}
-  /* ── Legend ── */
   .legend {{
     margin-top:36px; padding-top:16px;
     border-top:1px solid var(--border);
@@ -267,8 +257,8 @@ def build_page(sector_df, tech_df):
 <body>
 
 <div class="header">
-  <h1>📊 Sector Rotation Tracker</h1>
-  <p>Muffett Investment &nbsp;·&nbsp; Updated: {now} &nbsp;·&nbsp; Auto-refreshes hourly &nbsp;·&nbsp; Source: Yahoo Finance</p>
+  <h1>&#128202; Sector Rotation Tracker</h1>
+  <p>Muffett Investments &nbsp;&middot;&nbsp; Updated: {now} &nbsp;&middot;&nbsp; Source: Yahoo Finance</p>
 </div>
 
 {s_hm}
@@ -277,32 +267,35 @@ def build_page(sector_df, tech_df):
 {t_tb}
 
 <div class="legend">
-  <strong>RS Score</strong> = 40% weekly return + 60% quarterly return &nbsp;·&nbsp;
-  <strong>vs Prev Wk/Qtr</strong> = change in return vs the prior equivalent period &nbsp;·&nbsp;
-  Ranked strongest → weakest
+  <strong>RS Score</strong> = 40% weekly return + 60% quarterly return &nbsp;&middot;&nbsp;
+  <strong>vs Prev Wk/Qtr</strong> = change in return vs the prior equivalent period &nbsp;&middot;&nbsp;
+  Ranked strongest &rarr; weakest
 </div>
 
 </body>
 </html>"""
 
-# ── Flask Routes ──────────────────────────────────────────────────────────────
-@app.route("/")
-def index():
-    now = time_mod.time()
-    if _cache["html"] and (now - _cache["ts"]) < CACHE_TTL:
-        return Response(_cache["html"], mimetype="text/html")
 
-    sector_df = fetch_returns(SECTOR_ETFS)
-    tech_df   = fetch_returns(TECH_ETFS)
-    html      = build_page(sector_df, tech_df)
+# ── Vercel Handler ────────────────────────────────────────────────────────────
+class handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        try:
+            sector_df = fetch_returns(SECTOR_ETFS)
+            tech_df   = fetch_returns(TECH_ETFS)
+            html      = build_page(sector_df, tech_df)
+            body      = html.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+        except Exception as e:
+            msg = f"Error: {e}".encode("utf-8")
+            self.send_response(500)
+            self.send_header("Content-Type", "text/plain")
+            self.send_header("Content-Length", str(len(msg)))
+            self.end_headers()
+            self.wfile.write(msg)
 
-    _cache["html"] = html
-    _cache["ts"]   = now
-    return Response(html, mimetype="text/html")
-
-@app.route("/health")
-def health():
-    return {"status": "ok", "cached": _cache["ts"] > 0}
-
-if __name__ == "__main__":
-    app.run(debug=True, port=5001)
+    def log_message(self, format, *args):
+        pass  # suppress default access logs
