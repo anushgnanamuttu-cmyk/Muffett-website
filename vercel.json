@@ -1,5 +1,7 @@
 {
   "rewrites": [
+    { "source": "/nasdaq", "destination": "/api/nasdaq" },
+    { "source": "/nasdaq/(.*)", "destination": "/api/nasdaq" },
     { "source": "/(.*)", "destination": "/api/index" }
   ]
 }
